@@ -1,0 +1,245 @@
+#!/bin/sh
+
+# AWS Profile Switcher with MFA and SSO support
+# Auto-detects profile types and handles authentication accordingly
+# Compatible with bash, zsh, and POSIX shells on all Unix systems
+
+set -e
+
+# Ensure we're using a bash-compatible shell for advanced features
+if [ -z "$BASH_VERSION" ] && [ -z "$ZSH_VERSION" ]; then
+    # Try to re-exec with bash if available
+    if command -v bash >/dev/null 2>&1; then
+        exec bash "$0" "$@"
+    fi
+    # Fallback message for unsupported shells
+    echo "Error: This script requires bash or zsh for advanced features."
+    echo "Please install bash or run with: bash $0"
+    exit 1
+fi
+
+# Colors for output (with terminal detection)
+if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
+    RED=$(tput setaf 1 2>/dev/null || echo '')
+    GREEN=$(tput setaf 2 2>/dev/null || echo '')
+    YELLOW=$(tput setaf 3 2>/dev/null || echo '')
+    BLUE=$(tput setaf 4 2>/dev/null || echo '')
+    NC=$(tput sgr0 2>/dev/null || echo '')
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
+
+# Function to print colored output (portable)
+print_info() { printf "%sℹ %s%s\n" "$BLUE" "$1" "$NC"; }
+print_success() { printf "%s✓ %s%s\n" "$GREEN" "$1" "$NC"; }
+print_warning() { printf "%s⚠ %s%s\n" "$YELLOW" "$1" "$NC"; }
+print_error() { printf "%s✗ %s%s\n" "$RED" "$1" "$NC"; }
+
+# Check if AWS CLI is installed
+if ! command -v aws >/dev/null 2>&1; then
+    print_error "AWS CLI is not installed"
+    exit 1
+fi
+
+# Function to get all AWS profiles
+get_profiles() {
+    local profiles=()
+    local has_default=false
+    
+    # Check if default profile exists in credentials or config
+    if aws configure list --profile default &> /dev/null 2>&1; then
+        profiles+=("default")
+        has_default=true
+    fi
+    
+    # Add named profiles from AWS config
+    if [ -f ~/.aws/config ]; then
+        while IFS= read -r line; do
+            if [[ $line =~ ^\[profile\ (.+)\]$ ]]; then
+                local profile_name="${BASH_REMATCH[1]}"
+                # Skip if it's default and we already added it
+                if [ "$profile_name" != "default" ] || [ "$has_default" = false ]; then
+                    profiles+=("$profile_name")
+                fi
+            fi
+        done < ~/.aws/config
+    fi
+    
+    printf '%s\n' "${profiles[@]}"
+}
+
+# Function to detect if profile uses SSO
+is_sso_profile() {
+    local profile=$1
+    
+    if [ "$profile" = "default" ]; then
+        aws configure get sso_start_url >/dev/null 2>&1
+    else
+        aws configure get sso_start_url --profile "$profile" >/dev/null 2>&1
+    fi
+}
+
+# Function to check if default credentials are expired
+check_default_expired() {
+    if ! aws sts get-caller-identity >/dev/null 2>&1; then
+        return 0 # expired
+    else
+        return 1 # not expired
+    fi
+}
+
+# Function to check if SSO credentials are expired
+check_sso_expired() {
+    local profile=$1
+    if ! aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
+        return 0 # expired
+    else
+        return 1 # not expired
+    fi
+}
+
+# Get available profiles  
+profiles=()
+while IFS= read -r profile || [ -n "$profile" ]; do
+    [ -n "$profile" ] && profiles+=("$profile")
+done <<EOF
+$(get_profiles)
+EOF
+
+if [ ${#profiles[@]} -eq 0 ]; then
+    print_error "No AWS profiles found. Please configure at least one profile."
+    exit 1
+fi
+
+# Display menu - output everything to stderr to avoid wrapper buffering issues
+{
+    echo ""
+    print_info "Select AWS account to switch to:"
+    echo ""
+    for i in "${!profiles[@]}"; do
+        profile_info="${profiles[$i]}"
+        if is_sso_profile "${profiles[$i]}"; then
+            profile_info="${profiles[$i]} (SSO)"
+        else
+            profile_info="${profiles[$i]} (MFA/Keys)"
+        fi
+        echo "$((i+1)). $profile_info"
+    done
+    echo ""
+    printf "Enter your choice (1-${#profiles[@]}): "
+} >&2
+
+# Get user selection from stdin
+read choice
+
+# Validate input
+if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#profiles[@]} ]; then
+    print_error "Invalid choice. Please select a number between 1 and ${#profiles[@]}"
+    exit 1
+fi
+
+selected_profile="${profiles[$((choice-1))]}"
+print_info "Selected profile: $selected_profile"
+
+# Handle profile based on type
+if is_sso_profile "$selected_profile"; then
+    # Handle SSO profiles
+    print_info "Detected SSO profile: $selected_profile"
+    
+    # Logout from current SSO session if switching between different SSO profiles
+    if [ -n "$AWS_PROFILE" ] && [ "$AWS_PROFILE" != "default" ] && [ "$AWS_PROFILE" != "$selected_profile" ]; then
+        if is_sso_profile "$AWS_PROFILE"; then
+            print_info "Logging out of current SSO session..."
+            aws sso logout 2>/dev/null || true
+        fi
+    fi
+    
+    if check_sso_expired "$selected_profile"; then
+        print_warning "SSO credentials expired or invalid for $selected_profile"
+        print_info "Running aws sso login..."
+        
+        aws sso login --profile "$selected_profile"
+        if [ $? -eq 0 ]; then
+            print_success "SSO login successful for $selected_profile"
+            # Verify the login worked
+            if aws sts get-caller-identity --profile "$selected_profile" &> /dev/null; then
+                print_success "SSO credentials verified"
+            else
+                print_error "SSO login succeeded but credentials verification failed"
+                exit 1
+            fi
+        else
+            print_error "SSO login failed for $selected_profile"
+            exit 1
+        fi
+    else
+        print_success "SSO credentials are still valid for $selected_profile"
+    fi
+    
+    # Set AWS_PROFILE for SSO
+    export AWS_PROFILE="$selected_profile"
+    print_success "Switched to profile: $selected_profile"
+    
+else
+    # Handle MFA/Keys profiles
+    print_info "Detected MFA/Keys profile: $selected_profile"
+    
+    if [ "$selected_profile" = "default" ]; then
+        if check_default_expired; then
+            print_warning "Default credentials expired or invalid"
+            print_info "Running aws-mfa..."
+            
+            if command -v aws-mfa &> /dev/null; then
+                aws-mfa
+                if [ $? -eq 0 ]; then
+                    print_success "MFA authentication successful"
+                else
+                    print_error "MFA authentication failed"
+                    exit 1
+                fi
+            else
+                print_error "aws-mfa command not found. Please install aws-mfa first."
+                print_error "Install with: pip install aws-mfa"
+                exit 1
+            fi
+        else
+            print_success "Default credentials are still valid"
+        fi
+        
+        # Unset AWS_PROFILE to use default
+        unset AWS_PROFILE
+        print_success "Switched to default profile"
+    else
+        # Named profile with MFA/Keys - check if expired and set profile
+        if ! aws sts get-caller-identity --profile "$selected_profile" &> /dev/null; then
+            print_warning "Credentials for $selected_profile appear to be expired or invalid"
+            print_warning "Please refresh your credentials manually if needed"
+        fi
+        
+        export AWS_PROFILE="$selected_profile"
+        print_success "Switched to profile: $selected_profile"
+    fi
+fi
+
+# Show current identity
+echo ""
+print_info "Current AWS identity:"
+if [ -n "$AWS_PROFILE" ]; then
+    aws sts get-caller-identity --profile "$AWS_PROFILE" --output table
+else
+    aws sts get-caller-identity --output table
+fi
+
+# Output the export command for wrapper
+echo ""
+if [ "$selected_profile" != "default" ]; then
+    print_success "Setting AWS_PROFILE to: $selected_profile"
+    echo "AWSINIT_CMD=export AWS_PROFILE=\"$selected_profile\""
+else
+    print_success "Using default profile"
+    echo "AWSINIT_CMD=unset AWS_PROFILE"
+fi
