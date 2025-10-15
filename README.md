@@ -34,7 +34,29 @@ A simple, interactive AWS profile switcher that automatically handles both MFA-e
 
 ## Installation
 
-### Quick Install
+### Homebrew (Recommended)
+
+```bash
+brew tap lakipn/tap
+brew install awsinit
+```
+
+After installation, add the wrapper function to your shell config:
+
+**For Bash** (`~/.bashrc` or `~/.bash_profile`):
+```bash
+source /opt/homebrew/opt/awsinit/awsinit-wrapper.sh
+```
+
+**For Zsh** (`~/.zshrc`):
+```bash
+source /opt/homebrew/opt/awsinit/awsinit-wrapper.sh
+```
+
+**For Fish** (`~/.config/fish/config.fish`):
+See the fish function setup in the installer script or create manually.
+
+### Quick Install (From Source)
 
 ```bash
 git clone https://github.com/lakipn/aws-profile-switcher.git
