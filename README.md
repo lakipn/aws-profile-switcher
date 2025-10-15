@@ -1,5 +1,9 @@
 # AWS Profile Switcher
 
+[![Homebrew](https://img.shields.io/badge/Homebrew-tap-orange?logo=homebrew)](https://github.com/lakipn/homebrew-tap)
+[![GitHub release](https://img.shields.io/github/v/release/lakipn/aws-profile-switcher)](https://github.com/lakipn/aws-profile-switcher/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A simple, interactive AWS profile switcher that automatically handles both MFA-enabled profiles and AWS SSO profiles. No more manually setting environment variables or remembering complex commands!
 
 ## Features
