@@ -193,8 +193,9 @@ else
             print_warning "Default credentials expired or invalid"
             print_info "Running aws-mfa..."
             
-            if command -v aws-mfa &> /dev/null; then
-                aws-mfa
+            if command -v aws-mfa >/dev/null 2>&1; then
+                # Run aws-mfa interactively by redirecting to stderr to bypass wrapper
+                aws-mfa >&2
                 if [ $? -eq 0 ]; then
                     print_success "MFA authentication successful"
                 else
